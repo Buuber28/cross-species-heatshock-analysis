@@ -157,7 +157,24 @@ At the same time, mammalian cells display substantially more complex transcripti
 
 ---
 
-## Repository Status
+## Example Results
 
-This repository currently contains the analysis pipeline and project code used for the comparative heat-shock response study.
-Additional cleanup, documentation, and workflow organization are still in progress.
+### Differentially Expressed Genes
+
+![DEG Plot](/figures/DEGs.png)
+
+## Gene Ontology Enrichment Heatmap
+
+![GO HeatMap](figures/GO_HM.png)
+
+### Mapped Homologous DEGs
+
+![Mapped DEGs](figures/Mapped_DEGs.png)
+
+
+### DESeq2 Volcano Plot of Fibroblast dataset
+
+![Volcano Plot_Fibroblasts](figures/VolcanoPlot_Fibroblasten.png)
+
+
+
