@@ -1,0 +1,326 @@
+---
+title: "homologene_mapping"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(org.Sc.sgd.db)
+library(homologene)
+
+HeLa_degs <- read_csv("../data/HeLa_DEGs.csv")
+yeast_degs <- read_csv("../data/yeast_DEGs.csv")
+fibroblasts_degs <- read_csv("../data/Fibroblasten_DEGs.csv")
+
+
+```
+```{r}
+citation("org.Hs.eg.db")
+citation("org.Sc.sgd.db")
+citation("tidyverse")
+```
+
+## Preparation for mapping
+
+
+```{r}
+safe_mapIds <- function(db, keys_vec, keytype, column = "ENTREZID") {
+  keys_vec <- unique(as.character(keys_vec))
+  keys_vec <- keys_vec[!is.na(keys_vec)]
+  if (length(keys_vec) == 0) return(setNames(character(0), character(0)))
+
+  valid <- intersect(keys_vec, keys(db, keytype = keytype))
+  if (length(valid) == 0) return(setNames(character(0), character(0)))
+
+  mapIds(db, keys = valid, keytype = keytype, column = column, multiVals = "first")
+}
+```
+
+ Helper for yeast ENTREZ mapping
+
+```{r}
+map_yeast_to_entrez <- function(yeast_degs) {
+  yeast_degs <- yeast_degs %>% mutate(gene_id = as.character(gene_id))
+  yeast_degs$entrez <- NA_character_
+
+  is_orf <- str_detect(yeast_degs$gene_id, "^Y[A-P][LR][0-9]{3}[CW](-[A-Z])?$")
+
+  
+  m_orf <- safe_mapIds(org.Sc.sgd.db, yeast_degs$gene_id[is_orf], keytype = "ORF")
+
+ 
+  non_orf <- yeast_degs$gene_id[!is_orf]
+  entrez_nonorf <- rep(NA_character_, length(non_orf))
+
+  m_common   <- safe_mapIds(org.Sc.sgd.db, non_orf, keytype = "COMMON")
+  m_genename <- safe_mapIds(org.Sc.sgd.db, non_orf, keytype = "GENENAME")
+  m_alias    <- safe_mapIds(org.Sc.sgd.db, non_orf, keytype = "ALIAS")
+
+ 
+  idx <- match(names(m_common), non_orf); ok <- !is.na(idx)
+  entrez_nonorf[idx[ok]] <- as.character(m_common)[ok]
+
+
+  idx <- match(names(m_genename), non_orf); ok <- !is.na(idx) & is.na(entrez_nonorf[idx])
+  entrez_nonorf[idx[ok]] <- as.character(m_genename)[ok]
+
+  idx <- match(names(m_alias), non_orf); ok <- !is.na(idx) & is.na(entrez_nonorf[idx])
+  entrez_nonorf[idx[ok]] <- as.character(m_alias)[ok]
+
+ 
+  orf_ids <- yeast_degs$gene_id[is_orf]
+  orf_entrez <- rep(NA_character_, length(orf_ids))
+  idx <- match(orf_ids, names(m_orf)); ok <- !is.na(idx)
+  orf_entrez[ok] <- as.character(m_orf)[idx[ok]]
+
+  yeast_degs$entrez[is_orf] <- orf_entrez
+  yeast_degs$entrez[!is_orf] <- entrez_nonorf
+
+  list(
+    yeast_degs = yeast_degs,
+    yeast_mapped = yeast_degs %>% dplyr::filter(!is.na(entrez))
+  )
+}
+```
+
+Helper for human ENTREZ mapping
+```{r}
+map_human_ensg_to_entrez <- function(human_degs) {
+
+  human_degs$gene_id <- as.character(human_degs$gene_id)
+  
+ 
+  human_degs <- human_degs[str_detect(human_degs$gene_id, "^ENSG"), ]
+  
+
+  human_degs$ensembl <- human_degs$gene_id
+  
+
+  human_degs$entrez <- mapIds(
+    org.Hs.eg.db,
+    keys = human_degs$ensembl,
+    keytype = "ENSEMBL",
+    column = "ENTREZID",
+    multiVals = "first"
+  ) %>% as.character()
+  
+
+  human_degs <- human_degs[!is.na(human_degs$entrez), ]
+  
+ 
+  human_degs$symbol <- mapIds(
+    org.Hs.eg.db,
+    keys = human_degs$entrez,
+    keytype = "ENTREZID",
+    column = "SYMBOL",
+    multiVals = "first"
+  ) %>% as.character()
+  
+  return(human_degs)
+}
+
+```
+
+
+helper to make yeast to human pair 
+
+```{r}
+map_homologene_pair <- function(human_entrez, yeast_entrez, homologene_df) {
+
+  human_tax <- 9606
+  yeast_tax <- 4932
+
+  human_entrez <- as.character(human_entrez)
+  yeast_entrez <- as.character(yeast_entrez)
+
+  shared <- homologene_df %>%
+    dplyr::filter(Taxonomy %in% c(human_tax, yeast_tax)) %>%
+    mutate(
+      Gene.ID = as.character(Gene.ID),
+      Gene.Symbol = as.character(Gene.Symbol)
+    ) %>%
+    group_by(HID) %>%
+    dplyr::filter(any(Taxonomy == human_tax & Gene.ID %in% human_entrez) &
+           any(Taxonomy == yeast_tax & Gene.ID %in% yeast_entrez)) %>%
+    ungroup()
+
+  if (nrow(shared) == 0) {
+    return(tibble())
+  }
+
+  tmp <- shared %>%
+    group_by(HID, Taxonomy) %>%
+    summarize(
+      n_genes = n_distinct(Gene.ID),
+      entrez_ids = paste(unique(Gene.ID), collapse = ";"),
+      symbols = paste(unique(na.omit(Gene.Symbol)), collapse = ";"),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(
+      names_from = Taxonomy,
+      values_from = c(n_genes, entrez_ids, symbols),
+      values_fill = NA
+    )
+
+  tmp <- tmp %>%
+    mutate(
+      human_n      = n_genes_9606 %||% NA_integer_,
+      yeast_n      = n_genes_4932 %||% NA_integer_,
+      human_entrez = entrez_ids_9606 %||% NA_character_,
+      yeast_entrez = entrez_ids_4932 %||% NA_character_,
+      human_symbol = symbols_9606 %||% NA_character_,
+      yeast_symbol = symbols_4932 %||% NA_character_
+    ) %>%
+    dplyr::select(HID, human_n, yeast_n,
+           human_entrez, yeast_entrez,
+           human_symbol, yeast_symbol)
+
+  tmp %>%
+    mutate(mapping_class = case_when(
+      human_n == 1 & yeast_n == 1 ~ "1:1",
+      human_n == 1 & yeast_n > 1  ~ "1:n",
+      human_n > 1 & yeast_n == 1  ~ "n:1",
+      human_n > 1 & yeast_n > 1   ~ "n:n",
+      TRUE ~ NA_character_
+    ))
+}
+
+```
+
+
+```{r}
+# Yeast
+ye <- map_yeast_to_entrez(yeast_degs)
+yeast_degs <- ye$yeast_degs
+yeast_mapped <- ye$yeast_mapped
+
+# Human 
+HeLa_mapped <- map_human_ensg_to_entrez(HeLa_degs)
+fibroblasts_mapped <- map_human_ensg_to_entrez(fibroblasts_degs)
+
+
+```
+
+
+
+##Homologene Mapping
+```{r}
+HeLa_vs_yeast <- map_homologene_pair(
+  human_entrez = HeLa_mapped$entrez,
+  yeast_entrez = yeast_mapped$entrez,
+  homologene_df = homologeneData2
+)
+
+fibro_vs_yeast <- map_homologene_pair(
+  human_entrez = fibroblasts_mapped$entrez,
+  yeast_entrez = yeast_mapped$entrez,
+  homologene_df = homologeneData2
+)
+
+head(HeLa_vs_yeast)
+table(HeLa_vs_yeast$mapping_class)
+
+head(fibro_vs_yeast)
+table(fibro_vs_yeast$mapping_class)
+
+nrow(fibro_vs_yeast)
+nrow(HeLa_vs_yeast)
+```
+
+```{r}
+colnames(homologeneData2)
+head(homologeneData2)
+
+```
+
+
+ we can also make a union of the two human DEGs and have a unified set of mappings
+```{r}
+human_union_entrez <- union(HeLa_mapped$entrez, fibroblasts_mapped$entrez)
+human_intersect_entrez <- intersect(HeLa_mapped$entrez, fibroblasts_mapped$entrez)
+
+human_union_vs_yeast <- map_homologene_pair(human_union_entrez, yeast_mapped$entrez, homologeneData2)
+human_intersect_vs_yeast <- map_homologene_pair(human_intersect_entrez, yeast_mapped$entrez, homologeneData2)
+
+dim(human_union_vs_yeast)
+
+```
+number of genes present in both that have a mapping to yeast
+```{r}
+length(intersect(HeLa_vs_yeast$HID, fibro_vs_yeast$HID))
+```
+
+```{r}
+mouse_vs_yeast <- read.csv("../data/Mouse_Homologene_mapping.csv")
+mouse_degs <- read.csv("../data/mouse_DEGs.csv")
+```
+
+## plots of number of DEGs and mapping types
+```{r}
+
+
+deg_counts <- tibble(
+  Dataset = c("HeLa", "Fibroblasts", "Yeast", "Mouse"),
+  DEGs = c(
+    nrow(HeLa_degs),
+    nrow(fibroblasts_degs),
+    nrow(yeast_degs),
+    nrow(mouse_degs)
+  )
+)
+
+ggplot(deg_counts, aes(x = Dataset, y = DEGs, fill = Dataset)) +
+  geom_col() +
+  geom_text(aes(label = DEGs), vjust=-0.3) +
+  theme_minimal() +
+  labs(
+    title = "Number of DEGs per System",
+    y = "Number of DEGs"
+  )
+
+
+hela_mapping_summary <- HeLa_vs_yeast %>%
+  dplyr::filter(mapping_class %in% c("1:1", "1:n", "n:1", "n:n")) %>% 
+  dplyr::count(mapping_class) %>%
+  mutate(Dataset = "HeLa")
+
+fibro_mapping_summary <- fibro_vs_yeast %>%
+  dplyr::filter(mapping_class %in% c("1:1", "1:n", "n:1", "n:n")) %>%  
+  dplyr::count(mapping_class) %>%
+  mutate(Dataset = "Fibroblasts")
+
+
+mouse_mapping_summary <- mouse_vs_yeast %>%
+  dplyr::filter(mapping_class %in% c("1:1", "1:n", "n:1", "n:n")) %>%  
+  dplyr::count(mapping_class) %>%
+  mutate(Dataset = "Mouse")
+
+
+mapping_summary <- bind_rows(hela_mapping_summary, fibro_mapping_summary, mouse_mapping_summary)
+
+ggplot(mapping_summary, aes(x = Dataset, y = n, fill = mapping_class)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = n), position = position_dodge(width = 0.9), vjust = -0.3) +  
+  theme_minimal() +
+  labs(
+    title = "Number of DEGs by Homolog Mapping Type",
+    y = "Number of DEGs",
+    x = "",
+    fill = "Mapping Type"
+  )
+
+```
+
+
+
+
+```{r}
+write.csv(fibro_vs_yeast, "../data/fibro_yeast_homologene_mapping.csv", row.names = FALSE)
+
+write.csv(HeLa_vs_yeast, "../data/HeLa_yeast_homologene_mapping.csv", row.names = FALSE)
+
+write.csv(human_union_vs_yeast, "../data/human_union_yeast_homologene_mapping.csv", row.names = FALSE)
+
+```

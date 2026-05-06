@@ -1,0 +1,308 @@
+
+```{r}
+library(tidyverse)
+library(AnnotationDbi)
+library(clusterProfiler)
+library(org.Sc.sgd.db)
+library(org.Mm.eg.db)
+```
+
+
+```{r}
+
+yeast_rnaseq     <- read_tsv("../data/complex_yeast_heatshock.tsv")
+
+mouse_fpkm       <- read_csv("../data/mouse_WT_heatshock_FPKM_clean.csv")
+
+mouse_yeast_hom  <- read_csv("../data/Mouse_Homologene_mapping.csv")
+
+```
+
+```{r}
+map_mouse_ensg_to_entrez <- function(mouse_degs) {
+  mouse_degs %>%
+    mutate(gene_id = as.character(ensembl_id)) %>%
+    filter(str_detect(gene_id, "^ENSMUSG")) %>%
+    mutate(ensembl = sub("\\..*$", "", gene_id)) %>%
+    mutate(
+      entrez = AnnotationDbi::mapIds(
+        org.Mm.eg.db,
+        keys = ensembl,
+        keytype = "ENSEMBL",
+        column = "ENTREZID",
+        multiVals = "first"
+      ) %>% as.character()
+    ) %>%
+    filter(!is.na(entrez)) %>%
+    mutate(
+      symbol = AnnotationDbi::mapIds(
+        org.Mm.eg.db,
+        keys = entrez,
+        keytype = "ENTREZID",
+        column = "SYMBOL",
+        multiVals = "first"
+      ) %>% as.character()
+    )
+}
+
+```
+
+## Maping Yeast Ids to ENTREZ
+
+```{r}
+
+safe_mapIds <- function(db, keys_vec, keytype, column = "ENTREZID") {
+  keys_vec <- unique(as.character(keys_vec))
+  keys_vec <- keys_vec[!is.na(keys_vec)]
+  if (length(keys_vec) == 0) return(setNames(character(0), character(0)))
+
+  valid <- intersect(keys_vec, AnnotationDbi::keys(db, keytype = keytype))
+  if (length(valid) == 0) return(setNames(character(0), character(0)))
+
+  AnnotationDbi::mapIds(
+    db,
+    keys      = valid,
+    keytype   = keytype,
+    column    = column,
+    multiVals = "first"
+  )
+}
+
+
+clean_yeast_id <- function(x) {
+  x <- as.character(x)
+  x <- str_trim(x)
+  x <- str_split_fixed(x, "\\|", 2)[, 1]   
+  x <- str_replace(x, "^[A-Za-z]+:", "")   
+  x <- str_replace(x, "\\.[0-9]+$", "")    
+  x
+}
+
+
+map_yeast_to_entrez <- function(df, id_col = "gene_id", keep_debug_cols = TRUE) {
+  stopifnot(id_col %in% colnames(df))
+
+  out <- df %>%
+    mutate(
+      .raw_id   = as.character(.data[[id_col]]),
+      .clean_id = clean_yeast_id(.raw_id),
+      entrez    = NA_character_
+    )
+
+  ids <- out$.clean_id
+
+  is_numeric <- str_detect(ids, "^[0-9]+$")
+  out$entrez[is_numeric] <- ids[is_numeric]
+
+  is_orf <- str_detect(ids, "^Y[A-P][LR][0-9]{3}[CW](-[A-Z])?$")
+  m_orf  <- safe_mapIds(org.Sc.sgd.db, ids[is_orf], keytype = "ORF")
+
+  fill_back <- function(map_vec) {
+    if (length(map_vec) == 0) return()
+    idx <- match(names(map_vec), out$.clean_id)
+    ok  <- !is.na(idx) & is.na(out$entrez[idx])
+    out$entrez[idx[ok]] <<- as.character(map_vec)[ok]
+  }
+
+  fill_back(m_orf)
+
+  remaining <- out$.clean_id[is.na(out$entrez)]
+  kt <- keytypes(org.Sc.sgd.db)
+
+  if ("SGD"      %in% kt) fill_back(safe_mapIds(org.Sc.sgd.db, remaining, "SGD"))
+  if ("GENENAME"%in% kt) fill_back(safe_mapIds(org.Sc.sgd.db, remaining, "GENENAME"))
+  if ("COMMON"  %in% kt) fill_back(safe_mapIds(org.Sc.sgd.db, remaining, "COMMON"))
+  if ("ALIAS"   %in% kt) fill_back(safe_mapIds(org.Sc.sgd.db, remaining, "ALIAS"))
+  if ("UNIPROT" %in% kt) fill_back(safe_mapIds(org.Sc.sgd.db, remaining, "UNIPROT"))
+  if ("REFSEQ"  %in% kt) fill_back(safe_mapIds(org.Sc.sgd.db, remaining, "REFSEQ"))
+
+  stats <- list(
+    n_rows           = nrow(out),
+    n_unique_raw     = n_distinct(out$.raw_id),
+    n_unique_clean   = n_distinct(out$.clean_id),
+    n_mapped_rows    = sum(!is.na(out$entrez)),
+    frac_mapped      = mean(!is.na(out$entrez)),
+    n_unique_entrez  = n_distinct(out$entrez[!is.na(out$entrez)])
+  )
+
+  if (!keep_debug_cols) {
+    out <- out %>% select(-.raw_id, -.clean_id)
+  }
+
+  list(data = out, stats = stats)
+}
+```
+
+Yeast background: map raw yeast IDs
+```{r}
+mapped_yeast <- map_yeast_to_entrez(yeast_rnaseq, id_col = "gene_id", keep_debug_cols = TRUE)
+mapped_yeast$stats
+
+yeast_bg <- mapped_yeast$data$entrez %>%
+  na.omit() %>%
+  unique() %>%
+  as.character()
+length(yeast_bg)
+```
+MOUSE background
+```{r}
+mouse_entrez <- map_mouse_ensg_to_entrez(mouse_fpkm)
+
+mouse_bg <- mouse_entrez$entrez %>%
+  na.omit() %>%
+  unique() %>%
+  as.character()
+length(mouse_bg)
+```
+ Foreground DEG sets from homolog table + intersect 
+ 
+```{r}
+yeast_deg <- mouse_yeast_hom %>%
+  pull(yeast_entrez) %>%
+  na.omit() %>%
+  unique() %>%
+  as.character()
+
+mouse_deg <- mouse_yeast_hom %>%
+  pull(mouse_entrez) %>%
+  na.omit() %>%
+  unique() %>%
+  as.character()
+
+yeast_deg <- intersect(yeast_deg, yeast_bg)
+mouse_deg <- intersect(mouse_deg, mouse_bg)
+
+length(yeast_deg); length(yeast_bg)
+length(mouse_deg); length(mouse_bg)
+```
+ 
+ 
+ 
+```{r}
+ego_yeast_bp <- enrichGO(
+  gene          = yeast_deg,
+  universe      = yeast_bg,
+  OrgDb         = org.Sc.sgd.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.01,
+  qvalueCutoff  = 0.2,
+  readable      = FALSE
+)
+
+ego_mouse_bp <- enrichGO(
+  gene          = mouse_deg,
+  universe      = mouse_bg,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.01,
+  qvalueCutoff  = 0.2,
+  readable      = TRUE
+)
+
+```
+
+
+ 
+ 
+```{r}
+
+dotplot(ego_yeast_bp, showCategory = 12) +
+  ggtitle("Yeast GO BP enrichment") +
+  theme(axis.text.y = element_text(size = 7))
+
+dotplot(ego_mouse_bp, showCategory = 12) +
+  ggtitle("Mouse GO BP enrichment") +
+  theme(axis.text.y = element_text(size = 7))
+
+
+```
+```{r}
+shared_go <- intersect(ego_mouse_bp$ID, ego_yeast_bp$ID)
+
+shared_terms <- tibble(
+  GO_ID = shared_go,
+  term  = ego_mouse_bp$Description[match(shared_go, ego_mouse_bp$ID)]
+) %>% distinct()
+
+shared_terms
+```
+ 
+```{r}
+library(VennDiagram)
+
+grid.newpage()
+venn.plot <- draw.pairwise.venn(
+  area1 = nrow(ego_mouse_bp),
+  area2 = nrow(ego_yeast_bp),
+  cross.area = length(shared_go),
+  category = c("Mouse", "Yeast"),
+  fill = c("skyblue", "violetred"),
+  alpha = 0.5,
+  cat.pos = c(-20, 20),
+  cex = 1.2,
+  cat.cex = 1.2
+)
+```
+
+```{r}
+heatmap_all <- bind_rows(
+  as_tibble(ego_mouse_bp) %>% mutate(species = "Mouse"),
+  as_tibble(ego_yeast_bp) %>% mutate(species = "Yeast")
+) %>%
+  mutate(
+    logpadj = -log10(`p.adjust`),
+    shared  = ID %in% shared_terms$GO_ID
+  )
+
+top_terms <- heatmap_all %>%
+  group_by(Description) %>%
+  summarise(min_padj = min(`p.adjust`, na.rm = TRUE), .groups = "drop") %>%
+  arrange(min_padj) %>%
+  slice_head(n = 20) %>%
+  pull(Description)
+
+heatmap_top <- heatmap_all %>%
+  filter(Description %in% top_terms) %>%
+  mutate(
+    Description = factor(Description, levels = rev(top_terms)),
+    Description = Description |>
+      str_replace_all("ribosomal", "ribo.") |>
+      str_replace_all("biogenesis", "biogen.") |>
+      str_replace_all("processing", "proc.") |>
+      str_replace_all("modification", "mod.") |>
+      str_wrap(40)
+  )
+
+p1 <- ggplot(heatmap_top, aes(x = species, y = Description, fill = logpadj)) +
+  geom_tile(color = "white") +
+  geom_point(
+    data = subset(heatmap_top, shared),
+    aes(x = species, y = Description),
+    color = "navy", size = 2, shape = 8
+  ) +
+  scale_fill_gradient(low = "white", high = "violetred") +
+  labs(
+    x = "", y = "GO BP Term", fill = "-log10(adj p-value)",
+    title = "Top 20 GO BP Terms in Mouse and Yeast\n(shared terms marked in blue)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.y = element_text(size = 7),
+    axis.text.x = element_text(size = 9),
+    plot.title = element_text(size = 11, face = "bold")
+  )
+
+p1
+
+```
+
+
+
+```{r}
+ggsave(filename = "../figures/top20_GO_heatmap_Mouse_Yeast.png", plot = p1, width = 8, height = 6)
+```
+

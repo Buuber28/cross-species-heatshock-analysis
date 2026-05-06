@@ -1,0 +1,244 @@
+```{r, include=FALSE}
+library(DESeq2)
+library(tidyverse)
+```
+# DESeq2
+
+## Yeast
+```{r}
+counts <- read_tsv("../data/complex_yeast_heatshock.tsv")
+
+head(counts)
+```
+
+```{r}
+counts_mat <- counts %>%
+  column_to_rownames("gene_id") %>%
+  as.matrix()
+```
+
+```{r}
+sample_info <- tibble(sample = colnames(counts_mat)) %>%
+  separate(sample, into = c("temp", "time", "genotype", "rep"), sep = "_", remove = FALSE) %>%
+  mutate(
+    temp = as.integer(temp),
+    time = as.integer(time),
+    rep = factor(rep),
+    condition = factor(paste(temp, time, sep = "_"))
+  )
+```
+
+```{r}
+wt <- sample_info %>%
+  dplyr::filter(genotype == "Wildtype") %>%
+  mutate(condition = relevel(condition, ref = "25_0")) %>%
+  as.data.frame()
+
+rownames(wt) <- wt$sample
+
+counts_wt <- counts_mat[, rownames(wt), drop = FALSE]
+
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_wt,
+  colData   = wt,
+  design    = ~ condition
+)
+
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+dds <- DESeq(dds)
+```
+
+Instead of using only WT 37 °C at 10 min versus baseline, we additionally check whether the DEGs from this comparison show the same direction of regulation at 37 °C after 30 min. This filters out genes that appear significant due to noise or  expression spikes at the early time point
+
+```{r}
+res_37_10 <- results(dds, contrast = c("condition", "37_10", "25_0"))
+res_37_30 <- results(dds, contrast = c("condition", "37_30", "25_0"))
+
+sig_37_10 <- as.data.frame(res_37_10) %>%
+  rownames_to_column("gene_id") %>%
+  dplyr::filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1)
+
+res30_df <- as.data.frame(res_37_30) %>%
+  rownames_to_column("gene_id") %>%
+  transmute(gene_id, log2FoldChange_37_30 = log2FoldChange)
+
+yeast_DEGs <- sig_37_10 %>%
+  inner_join(res30_df, by = "gene_id") %>%
+  dplyr::filter(!is.na(log2FoldChange_37_30)) %>%
+  dplyr::filter(sign(log2FoldChange) != 0, sign(log2FoldChange_37_30) != 0) %>%
+  dplyr::filter(sign(log2FoldChange) == sign(log2FoldChange_37_30)) %>%
+  arrange(padj)
+
+nrow(yeast_DEGs)
+```
+
+
+```{r}
+write_csv(yeast_DEGs, "../data/yeast_DEGs.csv")
+```
+
+
+## Detection of DEGs for all strains
+```{r}
+sample_info <- tibble(sample = colnames(counts_mat)) %>%
+  separate(sample, into = c("temp","time","genotype","rep"), sep = "_", remove = FALSE) %>%
+  mutate(
+    temp = as.integer(temp),
+    time = as.integer(time),
+    rep = factor(rep),
+    genotype = factor(genotype),
+    condition = factor(paste(temp,time,sep="_"))
+  )
+rownames(sample_info) <- sample_info$sample
+
+
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_mat,
+  colData   = sample_info,
+  design    = ~ genotype + condition + genotype:condition
+)
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+dds <- DESeq(dds)
+
+genotypes <- levels(sample_info$genotype)
+all_DEGs <- list()
+
+for(g in genotypes){
+  if(g == "Double.KDKO"){
+    res_10 <- results(dds, name="condition_37_10_vs_25_0")
+    res_30 <- results(dds, name="condition_37_30_vs_25_0")
+  } else if(g == "Wildtype"){
+    res_10 <- results(dds, name="genotypeWildtype.condition37_10")
+    res_30 <- results(dds, name="genotypeWildtype.condition37_30")
+  } else {
+    name_10 <- paste0("genotype", g, ".condition37_10")
+    name_30 <- paste0("genotype", g, ".condition37_30")
+    
+    res_10 <- results(dds, name=name_10)
+    res_30 <- results(dds, name=name_30)
+  }
+
+  sig_10 <- as.data.frame(res_10) %>%
+    rownames_to_column("gene_id") %>%
+    dplyr::filter(!is.na(padj), padj<0.05, abs(log2FoldChange)>1)
+
+  res30_df <- as.data.frame(res_30) %>%
+    rownames_to_column("gene_id") %>%
+    transmute(gene_id, log2FoldChange_37_30=log2FoldChange)
+
+  degs <- sig_10 %>%
+    inner_join(res30_df, by="gene_id") %>%
+    dplyr::filter(sign(log2FoldChange)==sign(log2FoldChange_37_30)) %>%
+    mutate(genotype=g)
+
+  all_DEGs[[g]] <- degs
+}
+
+yeast_DEGs <- bind_rows(all_DEGs)
+
+table(yeast_DEGs$genotype)
+head(yeast_DEGs)
+
+nrow(yeast_DEGs)
+```
+
+
+```{r}
+write_csv(yeast_DEGs, "../data/all_strains_yeast_DEGs.csv")
+```
+
+## HeLa
+
+```{r, include = FALSE}
+library(apeglm)
+```
+
+
+```{r}
+human_hela_counts <- read_csv("../data/human_GSE247417_clean_counts.csv")
+
+```
+
+```{r}
+
+gene_ids <- human_hela_counts$gene_id  
+
+counts_all <- human_hela_counts %>%
+  dplyr::distinct(gene_id, .keep_all = TRUE)
+
+count_cols <- setdiff(colnames(counts_all), "gene_id")
+
+count_matrix <- counts_all %>%
+  dplyr::select(gene_id, dplyr::all_of(count_cols)) %>%
+  tibble::column_to_rownames("gene_id") %>%
+  as.matrix()
+
+count_matrix <- round(count_matrix)
+storage.mode(count_matrix) <- "integer"
+stopifnot(!anyNA(count_matrix))
+
+```
+
+
+
+
+```{r}
+samples <- colnames(count_matrix)
+condition <- ifelse(grepl("^HS", samples), "HS_GFP", "GFP")
+
+coldata <- data.frame(
+  row.names = samples,
+  condition = factor(condition, levels = c("GFP", "HS_GFP"))
+)
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = count_matrix, colData = coldata, design = ~ condition)
+dds <- dds[rowSums(counts(dds)) > 10, ]
+dds <- DESeq(dds)
+```
+
+
+
+```{r}
+res <- results(dds, contrast = c("condition", "HS_GFP", "GFP"))
+
+resultsNames(dds)
+
+
+res_shrunk <- lfcShrink(
+  dds,
+  coef = "condition_HS_GFP_vs_GFP",
+  type = "apeglm"
+)
+```
+
+
+```{r}
+res_df <- as.data.frame(res_shrunk) %>%
+  rownames_to_column("gene_id")
+
+head(res_df)
+```
+
+
+```{r}
+deg_hela <- res_df %>%
+  dplyr::filter(
+    !is.na(padj),
+    padj < 0.05,
+    abs(log2FoldChange) > 1
+  )
+
+nrow(deg_hela)
+```
+
+
+
+```{r}
+write.csv(deg_hela, "../data/HeLa_DEGs.csv", row.names = FALSE)
+```
+

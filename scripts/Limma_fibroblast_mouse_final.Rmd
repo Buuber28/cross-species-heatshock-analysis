@@ -1,0 +1,205 @@
+
+
+```{r, include=FALSE}
+library(limma)
+library(tidyverse)
+library(biomaRt)
+library(dplyr)
+library(EnsDb.Hsapiens.v86)
+library(ensembldb)
+```
+# Limma
+
+## Fibroblasts
+
+```{r}
+fib <- read.csv("../data/GSE100469_FPKM_human_Fibroblast_HS_Clean.csv")
+```
+
+
+```{r}
+expr_raw <- fib %>%
+ 
+  column_to_rownames("gene_id") %>%
+  as.matrix()
+expr_log <- log2(expr_raw + 1)
+
+
+expr_log <- normalizeBetweenArrays(expr_log, method = "quantile")
+```
+
+
+
+```{r}
+samples <- colnames(expr_log)
+
+
+coldata <- tibble(
+  sample = samples,
+  condition = factor(
+    c("control", "control", "control", "control", "heatshock", "heatshock"),
+    levels = c("control", "heatshock")
+  )
+)
+design
+coldata$condition <- factor(coldata$condition, levels = c("control", "heatshock"))
+design <- model.matrix(~ condition, data = coldata)
+
+fit <- lmFit(expr_log, design)
+fit <- eBayes(fit, trend = TRUE)
+
+res_fib <- topTable(fit, coef = "conditionheatshock", number = Inf, sort.by = "P")
+```
+
+```{r}
+head(res_fib)
+```
+
+```{r}
+deg_limma <- res_fib %>% rownames_to_column("gene_id") %>%
+  dplyr::filter(!is.na(adj.P.Val), adj.P.Val < 0.05, abs(logFC) > 0.5)
+```
+
+```{r}
+nrow(deg_limma)
+```
+
+
+```{r}
+write.csv(deg_limma, "../data/Fibroblasten_DEGs.csv")
+```
+
+
+## Mouse
+
+
+```{r}
+mouse <- read_csv("../data/mouse_WT_heatshock_FPKM_clean.csv")
+
+head(mouse)
+
+```
+
+Limma assumes a normal dist. , so we apply a log tranformation
+
+```{r}
+
+expr_raw <- mouse %>%
+  column_to_rownames("ensembl_id") %>%
+  as.matrix()
+
+expr_log <- log2(expr_raw + 1)
+
+```
+
+defining sample metadata:
+control 3 NT and 2 HS
+```{r}
+samples <- colnames(expr_log)
+
+coldata <- tibble(
+  sample = samples,
+  condition = if_else(str_detect(sample, "WT_HS"), "heatshock", "control")
+) %>%
+  mutate(condition = factor(condition, levels = c("control", "heatshock")))
+
+table(coldata$condition)
+
+
+expr_log <- expr_log[, coldata$sample, drop = FALSE]
+
+```
+ design matrices tell which group which sample belongs to (whether control or heatshock)
+
+```{r}
+
+design <- model.matrix(~ 0 + condition, data = coldata)
+colnames(design) <- levels(coldata$condition)
+design
+```
+
+first we fit the data, we create a contrast which describe the comparison we want to look at(here heatshock vs control). Then we apply the contrast and use eBayes() to estimate variance for each gene
+
+```{r}
+fit <- lmFit(expr_log, design)
+
+contrast <- makeContrasts(
+  HS_vs_CTRL = heatshock - control,
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2, trend = TRUE)
+
+```
+
+
+```{r}
+res_mouse <- topTable(
+  fit2,
+  coef = "HS_vs_CTRL",
+  number = Inf,
+  sort.by = "P"
+)
+
+head(res_mouse)
+
+summary(res_mouse$logFC)
+summary(-log10(res_mouse$P.Value))
+
+```
+
+
+```{r}
+deg_mouse <- res_mouse %>%
+  rownames_to_column("ensembl_id") %>%
+  dplyr::filter(adj.P.Val < 0.05, abs(logFC) > 0.5)
+
+```
+
+
+
+```{r}
+nrow(deg_mouse)
+```
+
+```{r}
+write.csv(deg_mouse, "../data/mouse_DEGs.csv", row.names = FALSE)
+```
+
+## looking at log 2 fold change spread between data sets 
+
+```{r}
+
+
+
+
+hela_deg <- read.csv("../data/HeLa_DEGs.csv")          
+fib_deg  <- read.csv("../data/Fibroblasten_DEGs.csv") 
+mouse_deg<- read.csv("../data/mouse_DEGs.csv")        
+comp <- tibble(
+  dataset = c(rep("HeLa (DESeq2)", nrow(hela_deg)),
+              rep("Fibroblast (limma)", nrow(fib_deg)),
+              rep("Mouse (limma)", nrow(mouse_deg))),
+  lfc = c(hela_deg$log2FoldChange, fib_deg$logFC, mouse_deg$logFC)
+)
+
+comp %>%
+  group_by(dataset) %>%
+  summarise(
+    n = n(),
+    lfc_IQR = IQR(lfc, na.rm=TRUE),
+    lfc_q05 = quantile(lfc, 0.05, na.rm=TRUE),
+    lfc_q95 = quantile(lfc, 0.95, na.rm=TRUE)
+  )
+
+ggplot(comp, aes(x=dataset, y=lfc)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  theme_minimal() +
+  labs(x=NULL, y="log2 fold change (DESeq2) / logFC (limma)")
+```
+```
+
+
+
+

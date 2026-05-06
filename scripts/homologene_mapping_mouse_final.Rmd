@@ -1,0 +1,263 @@
+---
+title: "homologene_mapping_mouse"
+output: html_document
+---
+
+```{r}
+library(AnnotationDbi)
+library(tidyverse)
+library(org.Mm.eg.db)
+library(org.Sc.sgd.db)
+library(homologene)
+library(stringr)
+
+mouse_degs <- read_csv("../data/mouse_DEGs.csv")
+yeast_degs <- read_csv("../data/yeast_DEGs.csv")
+
+head(mouse_degs)
+head(yeast_degs)
+```
+ map ids to ENTREZ 
+```{r}
+safe_mapIds <- function(db, keys_vec, keytype, column = "ENTREZID") {
+  keys_vec <- unique(as.character(keys_vec))
+  keys_vec <- keys_vec[!is.na(keys_vec)]
+  if (length(keys_vec) == 0) return(setNames(character(0), character(0)))
+
+  valid <- intersect(keys_vec, keys(db, keytype = keytype))
+  if (length(valid) == 0) return(setNames(character(0), character(0)))
+
+  mapIds(db,
+         keys = valid,
+         keytype = keytype,
+         column = column,
+         multiVals = "first")
+}
+```
+
+
+
+```{r}
+yeast_degs <- yeast_degs %>% mutate(gene_id = as.character(gene_id))
+yeast_degs$entrez <- NA_character_
+
+is_orf <- str_detect(yeast_degs$gene_id, "^Y[A-P][LR][0-9]{3}[CW](-[A-Z])?$")
+
+m_orf <- safe_mapIds(org.Sc.sgd.db, yeast_degs$gene_id[is_orf], keytype = "ORF")
+
+non_orf <- yeast_degs$gene_id[!is_orf]
+entrez_nonorf <- rep(NA_character_, length(non_orf))
+
+m_common   <- safe_mapIds(org.Sc.sgd.db, non_orf, keytype = "COMMON")
+m_genename <- safe_mapIds(org.Sc.sgd.db, non_orf, keytype = "GENENAME")
+m_alias    <- safe_mapIds(org.Sc.sgd.db, non_orf, keytype = "ALIAS")
+
+
+idx <- match(names(m_common), non_orf); ok <- !is.na(idx)
+entrez_nonorf[idx[ok]] <- as.character(m_common)[ok]
+
+
+idx <- match(names(m_genename), non_orf); ok <- !is.na(idx) & is.na(entrez_nonorf[idx])
+entrez_nonorf[idx[ok]] <- as.character(m_genename)[ok]
+
+idx <- match(names(m_alias), non_orf); ok <- !is.na(idx) & is.na(entrez_nonorf[idx])
+entrez_nonorf[idx[ok]] <- as.character(m_alias)[ok]
+
+
+orf_ids <- yeast_degs$gene_id[is_orf]
+orf_entrez <- rep(NA_character_, length(orf_ids))
+idx <- match(orf_ids, names(m_orf)); ok <- !is.na(idx)
+orf_entrez[ok] <- as.character(m_orf)[idx[ok]]
+
+yeast_degs$entrez[is_orf] <- orf_entrez
+yeast_degs$entrez[!is_orf] <- entrez_nonorf
+
+yeast_mapped <- yeast_degs %>% dplyr::filter(!is.na(entrez))
+
+```
+Verify how much % we succesfully mapped
+
+```{r}
+n_total <- n_distinct(yeast_degs$gene_id)
+n_mapped <- n_distinct(yeast_degs$gene_id[!is.na(yeast_degs$entrez)])
+coverage <- n_mapped / n_total
+coverage 
+```
+
+
+
+### Mouse
+
+
+
+
+
+```{r}
+mouse_mapped <- mouse_degs %>%
+  dplyr::mutate(
+    entrez = mapIds(
+      org.Mm.eg.db,
+      keys = ensembl_id,
+      keytype = "ENSEMBL",
+      column = "ENTREZID",
+      multiVals = "first"
+    ) %>% as.character(),
+    mapping_ok = !is.na(entrez)
+  ) %>%
+  dplyr::filter(mapping_ok)
+
+head(mouse_mapped)
+
+```
+
+
+```{r}
+mouse_mapped <- mouse_mapped %>%
+  mutate(
+    symbol = mapIds(
+      org.Mm.eg.db,
+      keys = entrez,
+      keytype = "ENTREZID",
+      column = "SYMBOL",
+      multiVals = "first"
+    ) %>% as.character()
+  )
+```
+
+
+
+#### mouse vs yeast
+```{r}
+yeast_tax <- 4932
+mouse_tax <- 10090
+
+shared_hids_mouse <- homologeneData2 %>%
+  group_by(HID) %>%
+  dplyr::filter(any(Taxonomy == mouse_tax) & any(Taxonomy == yeast_tax)) %>%
+  ungroup()
+
+mouse_hom <- shared_hids_mouse %>% dplyr::filter(Taxonomy == mouse_tax)
+yeast_hom <- shared_hids_mouse %>% dplyr::filter(Taxonomy == yeast_tax)
+
+mouse_hom_deg <- mouse_hom %>%
+  dplyr::filter(Gene.ID %in% mouse_mapped$entrez) 
+
+
+yeast_hom_deg <- yeast_hom %>%
+  dplyr::filter(Gene.ID %in% yeast_mapped$entrez)
+
+```
+
+
+### find common HIDs 
+HID = HomoloGene ID
+
+```{r}
+common_hids <- Reduce(intersect,
+  list(
+    mouse_hom_deg$HID,
+    yeast_hom_deg$HID
+  )
+)
+length(common_hids)
+
+common_hids
+```
+
+
+ 
+```{r}
+map_homologene <- function(mouse_entrez, yeast_entrez, homologene_df) {
+  mouse_tax <- 10090
+  yeast_tax <- 4932
+
+  mouse_entrez <- as.character(mouse_entrez)
+  yeast_entrez <- as.character(yeast_entrez)
+
+  shared_hids_sub <- homologene_df %>%
+    group_by(HID) %>%
+    dplyr::filter(any(Taxonomy == mouse_tax) & any(Taxonomy == yeast_tax)) %>%
+    ungroup() %>%
+    mutate(
+      Gene.ID = as.character(Gene.ID),
+      Gene.Symbol = as.character(Gene.Symbol)
+    )
+
+  common_hids <- intersect(
+    shared_hids_sub$HID[shared_hids_sub$Taxonomy == mouse_tax &
+                          shared_hids_sub$Gene.ID %in% mouse_entrez],
+    shared_hids_sub$HID[shared_hids_sub$Taxonomy == yeast_tax &
+                          shared_hids_sub$Gene.ID %in% yeast_entrez]
+  )
+
+  final <- shared_hids_sub %>%
+    dplyr::filter(HID %in% common_hids, Taxonomy %in% c(mouse_tax, yeast_tax)) %>%
+    group_by(HID, Taxonomy) %>%
+    summarize(
+      n_genes = n_distinct(Gene.ID),
+      genes_id = paste(sort(unique(Gene.ID)), collapse = ";"),
+      genes_symbol = paste(sort(unique(na.omit(Gene.Symbol))), collapse = ";"),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(
+      names_from = Taxonomy,
+      values_from = c(n_genes, genes_id, genes_symbol),
+      values_fill = list(
+        n_genes = 0,
+        genes_id = "",
+        genes_symbol = ""
+      )
+    ) %>%
+    mutate(
+      mouse_n = n_genes_10090,
+      yeast_n = n_genes_4932,
+      mouse_entrez = genes_id_10090,
+      yeast_entrez = genes_id_4932,
+      mouse_symbol = genes_symbol_10090,
+      yeast_symbol = genes_symbol_4932
+    ) %>%
+    mutate(mapping_class = case_when(
+      mouse_n == 1 & yeast_n == 1 ~ "1:1",
+      mouse_n == 1 & yeast_n > 1  ~ "1:n",
+      mouse_n > 1 & yeast_n == 1  ~ "n:1",
+      mouse_n > 1 & yeast_n > 1   ~ "n:n",
+      TRUE ~ NA_character_
+    )) %>%
+    dplyr::select(
+      HID,
+      mouse_n, yeast_n,
+      mouse_entrez, yeast_entrez,
+      mouse_symbol, yeast_symbol,
+      mapping_class
+    )
+
+  final
+}
+```
+
+
+
+```{r}
+final_genes_mouse <- map_homologene(
+  mouse_entrez = mouse_mapped$entrez,
+  yeast_entrez = yeast_mapped$entrez,
+  homologene_df = homologeneData2
+)
+
+```
+
+
+```{r}
+write.csv(final_genes_mouse, "../data/Mouse_Homologene_mapping.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+head(final_genes_mouse)
+table(final_genes_mouse$mapping_class)
+nrow(final_genes_mouse)
+
+```
+
+

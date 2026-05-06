@@ -1,0 +1,138 @@
+
+##HeLa 
+
+```{r, include= False}
+library(readr)
+library(dplyr)
+library(tidyverse)
+```
+
+
+```{r}
+## first line is causing erros, so lets skip it and name the columns later
+raw <- read_delim(
+  "../data/GSE247417_raw_counts.txt",
+  delim = " ",        
+  skip = 1,           
+  col_names = FALSE,  
+  trim_ws = TRUE,
+  show_col_types = FALSE
+)
+```
+
+
+
+```{r}
+colnames(raw) <- c(
+  "gene_id",
+  "GFP_rep1", "GFP_rep2", "GFP_rep3",
+  "HS-GFP_rep1", "HS-GFP_rep2", "HS-GFP_rep3",
+  "WT_rep1", "WT_rep2", "WT_rep3",
+  "HS-WT_rep1", "HS-WT_rep2", "HS-WT_rep3"
+)
+
+
+dim(raw)
+head(raw)
+
+
+```
+
+	•	GFP vs HS-GFP = “normal HeLa cells under heat shock vs control”
+	•	WT vs HS-WT = “HeLa cells with extra CLK2 under heat shock vs control”
+
+we don’t want to mix in CLK2 overexpression effects, so we just use GFP vs HS-GFP and ignore the “WT” 
+
+```{r}
+human_clean <- raw %>%
+  dplyr::select(
+    gene_id,
+    GFP_rep1, GFP_rep2, GFP_rep3,
+    `HS-GFP_rep1`, `HS-GFP_rep2`, `HS-GFP_rep3`
+  )
+
+dim(human_clean)
+head(human_clean)
+
+```
+
+
+```{r}
+write_csv(human_clean, "../data/human_GSE247417_clean_counts.csv")
+```
+
+
+## Mouse HS 
+
+```{r}
+mouse <- read_csv("../data/GSE133251_gene_fpkm_matrix.csv.gz")
+
+colnames(mouse)
+dim(mouse)
+head(mouse)
+```
+The columns mean the following:
+  • WT_NT_* = wild-type YAP/TAZ normal (no knockdown), no treatment
+	•	WT_HS_* = wild-type YAP/TAZ, heat shock
+	•	YAPTAZDKd_NT_* = YAP/TAZ double knockdown, no treatment
+	•	YAPTAZDKd_HS_* = YAP/TAZ double knockdown + heat shock
+	
+For the project we only need:
+	•	WT_NT_1–3 = control
+	•	WT_HS_1 & WT_HS_3 = heat shock
+
+
+```{r}
+library(tidyverse)
+
+
+mouse_clean <- mouse %>%
+  transmute(
+    ensembl_id = `#GeneID`,
+    WT_NT_1    = FPKM.WT_NT_1,
+    WT_NT_2    = FPKM.WT_NT_2,
+    WT_NT_3    = FPKM.WT_NT_3,
+    WT_HS_1    = FPKM.WT_HS_1,
+    WT_HS_3    = FPKM.WT_HS_3
+  )
+
+dim(mouse_clean)
+head(mouse_clean)
+```
+
+```{r}
+write_csv(mouse_clean, "mouse_WT_heatshock_FPKM_clean.csv")
+```
+
+## Fibroblasts
+
+```{r}
+
+
+human_raw <- read_tsv(
+  "../data/GSE100469_FPKM_stress.txt",
+)
+
+colnames(human_raw)[1] <- "gene_id"
+
+human_raw <- human_raw %>%
+  dplyr::filter(startsWith(gene_id, "ENSG"))
+
+human_mock_heat1h <- human_raw %>%
+  dplyr::select(
+    gene_id,
+    mock1_1, mock2_1,    # control, replicate 1
+    mock1_2, mock2_2,    # control, replicate 2
+    heat_1h_1,           # 1h HS, repl 1
+    heat_1h_2            # 1h HS, repl 2
+  )
+
+
+dim(human_mock_heat1h)
+head(human_mock_heat1h)
+```
+
+```{r}
+
+write_csv(human_mock_heat1h, "../data/GSE100469_FPKM_human_Fibroblast_HS_Clean.csv")
+```
